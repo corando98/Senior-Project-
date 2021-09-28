@@ -12,6 +12,6 @@
 
 ## Contributors
 
-Diego Garcia
-Trey Jones
-Sergio Montoya
+##### Diego Garcia
+##### Trey Jones
+##### Sergio Montoya
