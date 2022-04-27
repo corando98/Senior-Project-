@@ -1,0 +1,498 @@
+/* Include necessary libraries */
+// Arduino & Serial communication:
+#include <Arduino.h>
+#include <SPI.h>
+#include <Wire.h>
+#include <HardwareSerial.h>
+// Sensors (Ultrasonic, Compass, BMI):
+#include <NewPing.h>
+//#include <Adafruit_Sensor.h>
+#include <Adafruit_HMC5883_U.h>
+#include <BMI160Gen.h>
+//#include <CurieIMU.h>
+// Motors & Servos:
+#include <L298N.h>
+#include <ESP32Servo.h>
+
+/*  */
+#include <MadgwickAHRS.h>
+Madgwick filter;
+unsigned long microsPerReading, microsPrevious;
+
+
+/* Assign pin names, based on GPIO number: */
+// Servos
+const int smallServosPWM = 17;
+const int bigServosPWM = 16;
+// Motor Drivers
+const int trayMDriverIn2 = 15;
+const int trayMDriverIn1 = 2;
+const int trackMDriverIn4 = 26;
+const int trackMDriverIn3 = 27;
+const int trackMDriverIn2 = 14;
+const int trackMDriverIn1 = 12;
+const int trayEnable = 4;
+const int track1Enable = 13;
+const int track2Enable = 25;
+// Ultrasonic Sensors
+const int frontUltrasonicEcho = 34;
+const int frontUltrasonicTrig = 32;
+const int binUltrasonicEcho = 35;
+const int binUltrasonicTrig = 33;
+// UART Communication w/ RPi
+const int espRX = 3;
+const int espTX = 1;
+// I2C Communication w/ Compass
+const int I2CSerialClock = 22;
+const int CompassData = 21;
+// SPI Communication w/ BMI
+const int BMIChipSelect = 5;
+const int BMISerialClock = 18;
+const int BMIMISO = 19;
+const int BMIMOSI = 23;
+
+/* Initialize necessary structures (from libraries): */
+// Servos
+Servo smallServos;
+Servo bigServos;
+ESP32PWM pwm;
+// Motor Drivers
+L298N rightMotor(track1Enable, trackMDriverIn1, trackMDriverIn2);
+L298N leftMotor(track2Enable, trackMDriverIn3, trackMDriverIn4);
+L298N trayMotor(trayEnable, trayMDriverIn1, trayMDriverIn2);
+// Ultrasonic Sensors
+NewPing sonar(frontUltrasonicTrig, frontUltrasonicEcho, 200);
+NewPing binFill(binUltrasonicTrig, binUltrasonicEcho, 200);
+// UART Serial Comm w/ RPi
+HardwareSerial MySerial(1);
+// Compass
+Adafruit_HMC5883_Unified mag = Adafruit_HMC5883_Unified(12345);
+
+/* 
+Motor Driver Reference:
+IN1 & IN2 control Motor A
+IN3 & IN4 control Motor B
+
+Both IN set 0/1: Motor is off
+IN1/3 set to 1 & IN2/4 set to 0: Motor rotates clockwise
+IN1/3 set to 0 & IN2/4 set to 1: Motor rotates counter-clockwise
+*/
+
+void setup() {
+  // put your setup code here, to run once:
+
+  // Allow allocation of all timers
+	ESP32PWM::allocateTimer(0);
+	ESP32PWM::allocateTimer(1);
+  bigServos.setPeriodHertz(50);      // Standard 50hz servo
+	smallServos.setPeriodHertz(200);      // Standard 50hz servo
+
+  // Initialize the I2C library
+  Wire.begin();
+  
+  // Initialize serial communication with a 9600 baud rate, through microUSB
+  Serial.begin(9600);
+  while (!Serial);  // wait for the serial port to open
+  Serial.println("USB Serial Initialized"); // output to console when opened
+
+  // Initialize serial communication to RPi (9600 bps, 8 bits, No Parity, 1 Stop Bit)
+  //MySerial.begin(9600, SERIAL_8N1, espRX, espTX);
+  //MySerial.begin(9600, SERIAL_8N1, 16, 17);
+  //MySerial.setDebugOutput(true);
+  //while(!MySerial); // wait for serial port to open
+  Serial.println("Serial Initialized"); // output to console when opened
+  
+  // Initialize the SPI library
+  SPI.begin();
+  SPI.setClockDivider(SPI_CLOCK_DIV4);  //divide the clock by 4
+
+  // Set pins mode for each output
+  pinMode(smallServosPWM, OUTPUT);
+  pinMode(bigServosPWM, OUTPUT);
+  pinMode(trayMDriverIn2, OUTPUT);
+  pinMode(trayMDriverIn1, OUTPUT);
+  pinMode(trayEnable, OUTPUT);
+  pinMode(trackMDriverIn4, OUTPUT);
+  pinMode(trackMDriverIn3, OUTPUT);
+  pinMode(trackMDriverIn2, OUTPUT);
+  pinMode(trackMDriverIn1, OUTPUT);
+  pinMode(track1Enable, OUTPUT);
+  pinMode(track2Enable, OUTPUT);
+  pinMode(frontUltrasonicTrig, OUTPUT);
+  pinMode(binUltrasonicTrig, OUTPUT);
+  pinMode(BMIChipSelect, OUTPUT);
+  // Set pins mode for each input
+  pinMode(frontUltrasonicEcho, INPUT);
+  pinMode(binUltrasonicEcho, INPUT);
+  Serial.println("Pins Defined"); // output to console that pins were defined
+
+  // Attach PWM pins to servo definitions, with a min & max
+  // smallServos.attach(smallServosPWM, 10, 180);
+  // bigServos.attach(bigServosPWM, 20, 180);
+
+  // Initialize BMI-160 sensor for SPI communication
+  // BMI160.begin(BMIChipSelect);
+  // // Set gyroscope & accelerometer rate to 25
+  // BMI160.setAccelerometerRate(25);
+  // BMI160.setGyroRate(25);
+  // // Set accelerometer range to 2G
+  // BMI160.setAccelerometerRange(2);
+  // // Set the gyroscope range to 250 degrees/second
+  // BMI160.setGyroRange(250);
+
+
+  //spi_t * SPI = spiStartBus(VSPI, SPI_CLOCK_DIV4, SPI_MODE0, SPI_LSBFIRST);
+
+  // Give sensors & serial communication time to initialize
+  delay(100);
+}
+
+
+
+
+/* Section of setup code used for testing/callibrating BMI
+
+void setup() {
+  Serial.println("Calibrating gyro");
+  Serial.println("Old gyro offset");
+  Serial.println(BMI160.getGyroOffset(X_AXIS));
+  Serial.println(BMI160.getGyroOffset(Y_AXIS));
+  Serial.println(BMI160.getGyroOffset(Z_AXIS));
+
+  Serial.println("Starting autocalibration remain device still");
+  Serial.println("Remain still in...");
+  for(int i=0; i < 3; i++){
+    Serial.println(i + "s");
+    delay(1000);
+  }
+
+  BMI160.autoCalibrateAccelerometerOffset(X_AXIS, 0);
+  BMI160.autoCalibrateAccelerometerOffset(Y_AXIS, 0);
+  BMI160.autoCalibrateAccelerometerOffset(Z_AXIS, 1);
+
+  BMI160.autoCalibrateGyroOffset();
+  // BMI160.setGyroOffset(X_AXIS, -31.171);
+  // BMI160.setGyroOffset(Y_AXIS, -31.171);
+  // BMI160.setGyroOffset(Z_AXIS, -31.171);
+
+  Serial.println("New gyro offset");
+  Serial.println(BMI160.getGyroOffset(X_AXIS));
+  Serial.println(BMI160.getGyroOffset(Y_AXIS));
+  Serial.println(BMI160.getGyroOffset(Z_AXIS));
+
+  Serial.println("Calibration Complete");
+
+  //BMI160.begin(BMI160GenClass::I2C_MODE);
+  uint8_t dev_id = BMI160.getDeviceID();
+  Serial.print("DEVICE ID: ");
+  Serial.println(dev_id, HEX);
+
+  BMI160.setGyroOffsetEnabled(true);
+
+  Serial.println("Is accel offset enabled:");
+  Serial.print(BMI160.getAccelOffsetEnabled());
+  Serial.println("Is gyros offset enabled:");
+  Serial.print(BMI160.getGyroOffsetEnabled());
+
+  filter.begin(25);
+
+  // initialize variables to pace updates to correct rate
+  microsPerReading = 1000000 / 25;
+  microsPrevious = micros();
+}*/
+
+
+
+float convertRawAcceleration(int aRaw) {
+  // since we are using 2G range
+  // -2g maps to a raw value of -32768
+  // +2g maps to a raw value of 32767
+
+  float a = (aRaw * 2.0) / 32768.0;
+
+  return a;
+}
+
+float convertRawGyro(int gRaw) {
+  // since we are using 250 degrees/seconds range
+  // -250 maps to a raw value of -32768
+  // +250 maps to a raw value of 32767
+
+  float g = (gRaw * 250.0) / 32768.0;
+
+  return g;
+}
+
+void forward() {
+  digitalWrite(trackMDriverIn1, HIGH);
+  digitalWrite(trackMDriverIn3, HIGH);
+
+  digitalWrite(trackMDriverIn2, LOW);
+  digitalWrite(trackMDriverIn4, LOW);
+}
+
+void reverse() {
+  digitalWrite(trackMDriverIn1, LOW);
+  digitalWrite(trackMDriverIn3, LOW);
+
+  digitalWrite(trackMDriverIn2, HIGH);
+  digitalWrite(trackMDriverIn4, HIGH);
+}
+
+void turn(double degree) {
+
+}
+
+void openTray() {
+
+}
+
+void closeTray() {
+
+}
+
+void lowerArms() {
+  bigServos.write(90);
+}
+
+void raiseArms() {
+  bigServos.write(160);
+}
+
+void closeHands() {
+  smallServos.write(90);
+}
+
+void openHands() {
+  smallServos.write(160);
+}
+
+void stopDriving() {
+  digitalWrite(trackMDriverIn1, HIGH);
+  digitalWrite(trackMDriverIn2, HIGH);
+
+  digitalWrite(trackMDriverIn3, HIGH);
+  digitalWrite(trackMDriverIn4, HIGH);
+}
+
+byte number = 6;
+byte input = 0;
+
+int minUs = 500;
+int maxUs = 2500;
+int pos = 0;
+
+void loop() {
+  // put your main code here, to run repeatedly:
+
+  smallServos.attach(smallServosPWM, minUs, maxUs);
+  bigServos.attach(bigServosPWM, minUs, maxUs);
+  pwm.attachPin(27, 10000);//10khz
+
+  //MySerial.peek();
+  //if (MySerial.available()) {
+    // uint8_t byteFromSerial = MySerial.read();
+    // Serial.print("Character received: ");
+    // Serial.println(byteFromSerial);
+  //}
+  
+  //MySerial.write('6');
+  //delay(500);
+
+  // MySerial.write(number);
+  // input = MySerial.read();
+  // Serial.print("Character received: ");
+  // Serial.println(input, DEC);
+
+  // if (MySerial.available() > 0) {
+  //   //String data = MySerial.readStringUntil('\n'));
+  //   // int data = MySerial.read() - '0';
+  //   // Serial.print("You sent me: ");
+  //   // Serial.println(data);
+  //   // MySerial.print("You sent me: NUT");
+  //   // MySerial.println(data);
+
+  //   String number = MySerial.readString();
+  //   Serial.print("Character received: ");
+  //   Serial.println(number);
+  //   MySerial.write(number.toInt());
+  // }
+
+
+  //const int compassI2Caddress = 68;
+
+  //Serial.println(sonar.convert_cm(sonar.ping_median(50, 300)));
+
+  // delay(1000);                     // Wait 50ms between pings (about 20 pings/sec). 29ms should be the shortest delay between pings.
+  // Serial.print("Ping1: ");
+  // Serial.print(sonar.ping_cm()); // Send ping, get distance in cm and print result (0 = outside set distance range)
+  // Serial.println("cm");
+
+  // delay(1000);                     // Wait 50ms between pings (about 20 pings/sec). 29ms should be the shortest delay between pings.
+  // Serial.print("Ping2: ");
+  // Serial.print(binFill.ping_cm()); // Send ping, get distance in cm and print result (0 = outside set distance range)
+  // Serial.println("cm");
+
+  delay(1000);
+  for (pos = 0; pos <= 180; pos += 1) { // sweep from 0 degrees to 180 degrees
+		// in steps of 1 degree
+		bigServos.write(pos);
+		delay(1);             // waits 20ms for the servo to reach the position
+	}
+	for (pos = 180; pos >= 0; pos -= 1) { // sweep from 180 degrees to 0 degrees
+		bigServos.write(pos);
+		delay(1);
+	}
+  for (pos = 0; pos <= 180; pos += 1) { // sweep from 0 degrees to 180 degrees
+		// in steps of 1 degree
+		smallServos.write(pos);
+		delay(1);             // waits 20ms for the servo to reach the position
+	}
+	for (pos = 180; pos >= 0; pos -= 1) { // sweep from 180 degrees to 0 degrees
+		smallServos.write(pos);
+		delay(1);
+	}
+  
+  Serial.print("Small servo value: ");
+  Serial.println(smallServos.read());
+  Serial.print("Big servo value: ");
+  Serial.println(bigServos.read());
+  
+  
+  //ledcWrite(bigServosPWM, 90);
+  //ledcWrite(smallServosPWM, 90);
+  bigServos.detach();
+  smallServos.detach();
+  pwm.detachPin(27);
+  delay(1000);
+  //lowerArms();
+
+
+  // Logical Pseudocode:
+  // if (Serial.available()) {}
+  // then retrieve degree change needed and call turn function
+  // after turning, check with compass that 
+}
+
+
+
+/*
+long duration;
+int distance;
+void ultrasonicReading() {
+  // Clears the trigPin
+  digitalWrite(frontUltrasonicTrig, LOW);
+  delayMicroseconds(2);
+  // Sets the trigPin on HIGH state for 10 micro seconds
+  digitalWrite(frontUltrasonicTrig, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(frontUltrasonicTrig, LOW);
+  // Reads the echoPin, returns the sound wave travel time in microseconds
+  duration = pulseIn(frontUltrasonicEcho, HIGH);
+  // Calculating the distance
+  distance = duration * 0.034 / 2;
+  // Prints the distance on the Serial Monitor
+  Serial.print("Distance: ");
+  Serial.println(distance);
+}
+*/
+
+/* Loop used for outputting the gyroscope & accelerometer readings through Madgwick's algorithm 
+
+void loop() {
+  // put your main code here, to run repeatedly:
+  int aix, aiy, aiz;
+
+  int gix, giy, giz;
+
+  float ax, ay, az;
+
+  float gx, gy, gz;
+
+  float roll, pitch, heading;
+
+  unsigned long microsNow;
+
+  // check if it's time to read data and update the filter
+
+  microsNow = micros();
+
+  if (microsNow - microsPrevious >= microsPerReading) {
+
+    // read raw data from CurieIMU
+
+    CurieIMU.readMotionSensor(aix, aiy, aiz, gix, giy, giz);
+
+    // convert from raw data to gravity and degrees/second units
+
+    ax = convertRawAcceleration(aix);
+
+    ay = convertRawAcceleration(aiy);
+
+    az = convertRawAcceleration(aiz);
+
+    gx = convertRawGyro(gix);
+
+    gy = convertRawGyro(giy);
+
+    gz = convertRawGyro(giz);
+
+    // update the filter, which computes orientation
+
+    filter.updateIMU(gx, gy, gz, ax, ay, az);
+
+    // print the heading, pitch and roll
+
+    roll = filter.getRoll();
+
+    pitch = filter.getPitch();
+
+    heading = filter.getYaw();
+
+    Serial.print("Orientation: ");
+
+    Serial.print(heading);
+
+    Serial.print(" ");
+
+    Serial.print(pitch);
+
+    Serial.print(" ");
+
+    Serial.println(roll);
+
+    // increment previous time, so we keep proper pace
+
+    microsPrevious = microsPrevious + microsPerReading;
+
+  }
+}*/
+
+
+
+
+/* Loop for outputting the raw gyroscope measurements
+
+void loop() {
+  int gxRaw, gyRaw, gzRaw;         // raw gyro values
+  float gx, gy, gz;
+
+  // read raw gyro measurements from device
+  BMI160.readGyro(gxRaw, gyRaw, gzRaw);
+
+  // convert the raw gyro data to degrees/second
+  gx = convertRawGyro(gxRaw);
+  gy = convertRawGyro(gyRaw);
+  gz = convertRawGyro(gzRaw);
+
+  // display tab-separated gyro x/y/z values
+  Serial.print("g:\t");
+  Serial.print(gx);
+  Serial.print("\t");
+  Serial.print(gy);
+  Serial.print("\t");
+  Serial.print(gz);
+  Serial.println();
+
+  delay(500);
+}*/
